@@ -1,0 +1,248 @@
+package desktop
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+type SyncOptions struct {
+	ThemeName string
+	Size      int
+}
+
+type dmsCursorSettings struct {
+	Theme string `json:"theme"`
+	Size  int    `json:"size"`
+	Niri  struct {
+		HideWhenTyping      bool `json:"hideWhenTyping"`
+		HideAfterInactiveMs int  `json:"hideAfterInactiveMs"`
+	} `json:"niri"`
+}
+
+func GetUserHome() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return os.Getenv("HOME")
+}
+
+func slotStatePath() string {
+	return filepath.Join(GetUserHome(), ".cache", "dms", "dynamic-cursor-slot.json")
+}
+
+func ReadCurrentSlot() string {
+	data, err := os.ReadFile(slotStatePath())
+	if err != nil {
+		return "A"
+	}
+
+	var state struct {
+		Slot string `json:"slot"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil || state.Slot == "" {
+		return "A"
+	}
+	return state.Slot
+}
+
+func SaveCurrentSlot(slot, theme string) error {
+	path := slotStatePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+
+	data, err := json.Marshal(struct {
+		Slot  string `json:"slot"`
+		Theme string `json:"theme"`
+	}{
+		Slot:  slot,
+		Theme: theme,
+	})
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, data, 0644)
+}
+
+func readDmsSettings() dmsCursorSettings {
+	cfg := dmsCursorSettings{Size: 24}
+	settingsPath := filepath.Join(GetUserHome(), ".config", "dms", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return cfg
+	}
+
+	var root struct {
+		CursorSettings dmsCursorSettings `json:"cursorSettings"`
+	}
+	if err := json.Unmarshal(data, &root); err == nil {
+		if root.CursorSettings.Size > 0 {
+			cfg.Size = root.CursorSettings.Size
+		}
+		cfg.Theme = root.CursorSettings.Theme
+		cfg.Niri = root.CursorSettings.Niri
+	}
+	return cfg
+}
+
+func ReadDmsCursorSize() int {
+	return readDmsSettings().Size
+}
+
+func ApplyTheme(opts SyncOptions) error {
+	home := GetUserHome()
+	theme := opts.ThemeName
+	dmsCfg := readDmsSettings()
+	size := opts.Size
+	if size <= 0 {
+		size = dmsCfg.Size
+	}
+
+	defaultIndexDir := filepath.Join(home, ".icons", "default")
+	if err := os.MkdirAll(defaultIndexDir, 0755); err == nil {
+		content := fmt.Sprintf("[Icon Theme]\nName=Default\nComment=Default Cursor Theme\nInherits=%s\n", theme)
+		_ = os.WriteFile(filepath.Join(defaultIndexDir, "index.theme"), []byte(content), 0644)
+	}
+
+	localDefault := filepath.Join(home, ".local", "share", "icons", "default")
+	_ = os.MkdirAll(filepath.Dir(localDefault), 0755)
+	_ = os.Remove(localDefault)
+	_ = os.Symlink(defaultIndexDir, localDefault)
+
+	sizeStr := strconv.Itoa(size)
+	_ = exec.Command("gsettings", "set", "org.gnome.desktop.interface", "cursor-theme", theme).Run()
+	_ = exec.Command("gsettings", "set", "org.gnome.desktop.interface", "cursor-size", sizeStr).Run()
+
+	for _, gtkVer := range []string{"gtk-3.0", "gtk-4.0"} {
+		iniPath := filepath.Join(home, ".config", gtkVer, "settings.ini")
+		updateIniKey(iniPath, "gtk-cursor-theme-name", theme)
+		updateIniKey(iniPath, "gtk-cursor-theme-size", sizeStr)
+	}
+
+	xresPath := filepath.Join(home, ".Xresources")
+	updateXresourceKey(xresPath, "Xcursor.theme", theme)
+	updateXresourceKey(xresPath, "Xcursor.size", sizeStr)
+	_ = exec.Command("xrdb", "-merge", xresPath).Run()
+
+	if os.Getenv("NIRI_SOCKET") != "" {
+		writeNiriCursorConfig(home, theme, size, dmsCfg)
+		_ = exec.Command("niri", "msg", "action", "load-config-file").Run()
+	}
+
+	if os.Getenv("HYPRLAND_INSTANCE_SIGNATURE") != "" {
+		_ = exec.Command("hyprctl", "setcursor", theme, sizeStr).Run()
+	}
+
+	return nil
+}
+
+// Cleanup removes generated cursor theme slots and state, restoring the fallback cursor theme.
+func Cleanup(baseName, fallbackTheme string, size int) error {
+	home := GetUserHome()
+	iconsDir := filepath.Join(home, ".local", "share", "icons")
+
+	for _, slot := range []string{"A", "B"} {
+		_ = os.RemoveAll(filepath.Join(iconsDir, fmt.Sprintf("%s-%s", baseName, slot)))
+	}
+	_ = os.Remove(slotStatePath())
+
+	dmsCfg := readDmsSettings()
+	if size <= 0 {
+		size = dmsCfg.Size
+	}
+	if fallbackTheme == "" {
+		if dmsCfg.Theme != "" && dmsCfg.Theme != "System Default" && !strings.HasPrefix(dmsCfg.Theme, baseName+"-") {
+			fallbackTheme = dmsCfg.Theme
+		} else {
+			fallbackTheme = "Adwaita"
+		}
+	}
+
+	localDefault := filepath.Join(iconsDir, "default")
+	if target, err := os.Readlink(localDefault); err == nil && target == filepath.Join(home, ".icons", "default") {
+		_ = os.Remove(localDefault)
+	}
+	_ = os.Remove(filepath.Join(home, ".icons", "default", "index.theme"))
+
+	return ApplyTheme(SyncOptions{
+		ThemeName: fallbackTheme,
+		Size:      size,
+	})
+}
+
+func writeNiriCursorConfig(home, theme string, size int, dmsCfg dmsCursorSettings) {
+	cursorKdlPath := filepath.Join(home, ".config", "niri", "dms", "cursor.kdl")
+	if err := os.MkdirAll(filepath.Dir(cursorKdlPath), 0755); err != nil {
+		return
+	}
+
+	var b strings.Builder
+	b.WriteString("// ! DO NOT EDIT !\n")
+	b.WriteString("// ! AUTO-GENERATED BY DMS !\n")
+	b.WriteString("// ! CHANGES WILL BE OVERWRITTEN !\n")
+	b.WriteString("// ! PLACE YOUR CUSTOM CONFIGURATION ELSEWHERE !\n\n")
+	b.WriteString("cursor {\n")
+	if theme != "" {
+		fmt.Fprintf(&b, "    xcursor-theme %q\n", theme)
+	}
+	fmt.Fprintf(&b, "    xcursor-size %d\n", size)
+	if dmsCfg.Niri.HideWhenTyping {
+		b.WriteString("    hide-when-typing\n")
+	}
+	if dmsCfg.Niri.HideAfterInactiveMs > 0 {
+		fmt.Fprintf(&b, "    hide-after-inactive-ms %d\n", dmsCfg.Niri.HideAfterInactiveMs)
+	}
+	b.WriteString("}\n")
+
+	_ = os.WriteFile(cursorKdlPath, []byte(b.String()), 0644)
+}
+
+func updateIniKey(filePath, key, val string) {
+	data, err := os.ReadFile(filePath)
+	re := regexp.MustCompile(fmt.Sprintf(`(?m)^%s\s*=.*$`, regexp.QuoteMeta(key)))
+	targetLine := fmt.Sprintf("%s=%s", key, val)
+
+	if err == nil {
+		content := string(data)
+		if re.MatchString(content) {
+			_ = os.WriteFile(filePath, []byte(re.ReplaceAllString(content, targetLine)), 0644)
+			return
+		}
+		if reSec := regexp.MustCompile(`(?m)^\[Settings\]`); reSec.MatchString(content) {
+			updated := reSec.ReplaceAllString(content, fmt.Sprintf("[Settings]\n%s", targetLine))
+			_ = os.WriteFile(filePath, []byte(updated), 0644)
+			return
+		}
+		_ = os.WriteFile(filePath, []byte(fmt.Sprintf("%s\n[Settings]\n%s\n", content, targetLine)), 0644)
+		return
+	}
+
+	_ = os.MkdirAll(filepath.Dir(filePath), 0755)
+	_ = os.WriteFile(filePath, []byte(fmt.Sprintf("[Settings]\n%s\n", targetLine)), 0644)
+}
+
+func updateXresourceKey(filePath, key, val string) {
+	data, err := os.ReadFile(filePath)
+	re := regexp.MustCompile(fmt.Sprintf(`(?m)^\s*%s:.*$`, regexp.QuoteMeta(key)))
+	targetLine := fmt.Sprintf("%s: %s", key, val)
+
+	if err == nil {
+		content := string(data)
+		if re.MatchString(content) {
+			_ = os.WriteFile(filePath, []byte(re.ReplaceAllString(content, targetLine)), 0644)
+			return
+		}
+		_ = os.WriteFile(filePath, []byte(fmt.Sprintf("%s\n%s\n", strings.TrimRight(content, "\n"), targetLine)), 0644)
+		return
+	}
+
+	_ = os.MkdirAll(filepath.Dir(filePath), 0755)
+	_ = os.WriteFile(filePath, []byte(fmt.Sprintf("%s\n", targetLine)), 0644)
+}

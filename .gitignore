@@ -1,0 +1,5 @@
+/bin/
+/cursor-recolor
+*.qmlc
+*.jsc
+*_qmlcache.qrc

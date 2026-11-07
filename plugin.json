@@ -1,0 +1,23 @@
+{
+  "$schema": "https://github.com/duxlabs-dev/dux-shell/raw/refs/heads/master/quickshell/PLUGINS/plugin-schema.json",
+  "id": "dmsDynamicCursor",
+  "name": "Dynamic Palette Cursor",
+  "description": "Recolors the cursor theme to match the DMS Material 3 palette.",
+  "version": "1.0.0",
+  "author": "Luís Carvalho",
+  "license": "MIT",
+  "icon": "mouse",
+  "type": "daemon",
+  "capabilities": [
+    "cursor",
+    "theming"
+  ],
+  "component": "./DynamicCursorDaemon.qml",
+  "settings": "./DynamicCursorSettings.qml",
+  "requires_dms": ">=2.0.0",
+  "permissions": [
+    "settings_read",
+    "settings_write",
+    "process"
+  ]
+}
