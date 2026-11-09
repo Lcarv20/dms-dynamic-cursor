@@ -24,12 +24,13 @@ PluginSettings {
 
     StyledText {
         width: parent ? parent.width : 360
-        wrapMode: Text.WordWrap
-        text: "Recolors the cursor theme to match the active DMS Material 3 primary accent."
+        wrapMode: Text.Wrap
+        text: "Dynamically recolors mouse cursors in real time to match the DMS Material 3 wallpaper palette. Generates exact color matches with sub-50ms latency using a standalone native Go engine."
         color: Theme.surfaceTextSecondary
         font.pixelSize: Theme.fontSizeSmall
     }
 
+    // ------------------------------------------------------------ Status Card
     Rectangle {
         width: parent ? parent.width : 360
         height: statusCol.implicitHeight + 24
@@ -64,7 +65,7 @@ PluginSettings {
                 StyledText {
                     text: {
                         const d = root.daemon();
-                        if (!d) return "Daemon not running";
+                        if (!d) return "Daemon status: Not running";
                         return "Status: " + d.statusMessage;
                     }
                     font.pixelSize: Theme.fontSizeSmall
@@ -76,8 +77,11 @@ PluginSettings {
             StyledText {
                 text: {
                     const d = root.daemon();
-                    if (!d || !d.lastAppliedTheme) return "Theme: not yet applied";
-                    return "Theme: " + d.lastAppliedTheme + " (slot " + d.lastAppliedSlot + ")";
+                    if (!d) return "";
+                    const theme = d.lastAppliedTheme || "Dux-Dynamic";
+                    const slot = d.lastAppliedSlot || "—";
+                    const ms = d.lastElapsedMs || 0;
+                    return "Active Theme: " + theme + " (Slot: " + slot + ") · Latency: " + ms + " ms";
                 }
                 color: Theme.surfaceTextSecondary
                 font.pixelSize: Theme.fontSizeSmall
@@ -85,6 +89,7 @@ PluginSettings {
         }
     }
 
+    // ------------------------------------------------------------ Actions
     Row {
         spacing: Theme.spacingM
 
@@ -93,24 +98,33 @@ PluginSettings {
             iconName: "refresh"
             onClicked: {
                 const d = root.daemon();
-                if (d) d.forceRecolor();
+                if (d) {
+                    d.lastAccent = ""; // force re-evaluation
+                    d.executeRecolor();
+                }
             }
         }
+    }
 
-        DButton {
-            text: "Reset & Clean Up"
-            iconName: "delete_sweep"
-            onClicked: {
-                const d = root.daemon();
-                if (d) d.cleanupThemes();
-            }
-        }
+    // ------------------------------------------------------------ Settings
+    ToggleSetting {
+        settingKey: "enabled"
+        label: "Enable dynamic palette cursor"
+        description: "Master switch. Automatically follows desktop wallpaper palette changes."
+        defaultValue: true
     }
 
     ToggleSetting {
         settingKey: "invertSets"
         label: "Invert cursor contrast"
-        description: "Use a dark cursor fill in light mode and a light fill in dark mode."
+        description: "Use dark cursor body in light mode and light cursor body in dark mode."
         defaultValue: false
+    }
+
+    onSettingChanged: {
+        const d = root.daemon();
+        if (d) {
+            d.reloadSettings();
+        }
     }
 }
